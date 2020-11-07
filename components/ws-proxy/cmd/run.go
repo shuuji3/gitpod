@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,6 +16,7 @@ import (
 	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/common-go/pprof"
 	"github.com/gitpod-io/gitpod/ws-proxy/pkg/proxy"
+	"github.com/gitpod-io/gitpod/ws-proxy/pkg/sshproxy"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
@@ -77,6 +79,17 @@ var runCmd = &cobra.Command{
 			log.WithField("ingress", cfg.Ingress.Kind).Infof("started proxying on port range :%d-:%d", cfg.Ingress.PathAndPortIngress.Start, cfg.Ingress.PathAndPortIngress.End)
 		default:
 			log.Fatalf("unknown ingress kind %s", cfg.Ingress.Kind)
+		}
+
+		if cfg.SSHProxy.Enabled {
+			l, err := net.Listen("tcp", cfg.SSHProxy.Addr)
+			if err != nil {
+				log.WithError(err).Fatalf("cannot listen on %s for SSH proxy", cfg.SSHProxy.Addr)
+			}
+
+			prxy := sshproxy.NewProxy(workspaceInfoProvider, cfg.Proxy.WorkspacePodConfig)
+			go prxy.Serve(l)
+			log.WithField("addr", cfg.SSHProxy.Addr).Info("serving SSH proxy")
 		}
 
 		if cfg.PProfAddr != "" {

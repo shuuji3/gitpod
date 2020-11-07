@@ -87,6 +87,10 @@ data:
                 "supervisorImage": "{{ template "gitpod.comp.imageFull" (dict "root" . "gp" $.Values "comp" .Values.components.workspace.supervisor) }}"
             }
         },
+        "sshProxy": {
+            "enabled": {{ not $comp.sshProxy.disabled }},
+            "addr": ":{{ $comp.sshProxy.ports.ssh.containerPort }}"
+        },
         "pprofAddr": ":60060",
         "readinessProbeAddr": ":60088",
         "prometheusAddr": ":60095"
