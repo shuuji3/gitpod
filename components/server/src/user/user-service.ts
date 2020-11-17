@@ -11,7 +11,7 @@ import { HostContextProvider } from "../auth/host-context-provider";
 import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
 import { Env } from "../env";
 import { AuthProviderParams } from "../auth/auth-provider";
-import { TosNotAcceptedYetException } from "../auth/errors";
+import { BlockedUserFilter } from "../auth/blocked-user-filter";
 
 export interface FindUserByIdentityStrResult {
     user: User;
@@ -19,13 +19,21 @@ export interface FindUserByIdentityStrResult {
     authHost: string;
 }
 
-export interface CheckSignUpParams {
+export interface CheckTermsParams {
     config: AuthProviderParams;
-    identity: Identity;
+    identity?: Identity;
+    user?: User;
+}
+
+export interface CheckIsBlockedParams {
+    primaryEmail?: string;
+    user?: User;
 }
 
 @injectable()
 export class UserService {
+
+    @inject(BlockedUserFilter) protected readonly blockedUserFilter: BlockedUserFilter;
     @inject(UserDB) protected readonly userDb: UserDB;
     @inject(HostContextProvider) protected readonly hostContextProvider: HostContextProvider;
     @inject(Env) protected readonly env: Env;
@@ -85,9 +93,10 @@ export class UserService {
         }
     }
 
-    public async createUserForIdentity(identity: Identity): Promise<User> {
+    public async createUserForIdentity(identity: Identity, blockUser: boolean = false): Promise<User> {
         log.debug('(Auth) Creating new user.', { identity, 'login-flow': true });
         const newUser = await this.userDb.newUser();
+        newUser.blocked = blockUser;
         newUser.identities.push(identity);
         this.handleNewUser(newUser);
         return await this.userDb.storeUser(newUser);
@@ -110,13 +119,28 @@ export class UserService {
         return "30m";
     }
 
-    async checkSignUp(params: CheckSignUpParams) {
-        const { identity, config } = params;
-        if (config.requireTOS !== false) {
-            const userCount = await this.userDb.getUserCount();
-            if (userCount === 0) {
-                throw TosNotAcceptedYetException.create(identity);
-            }
+    async checkTermsAcceptanceRequired(params: CheckTermsParams): Promise<boolean> {
+        const { identity, config, user } = params;
+        if (config.requireTOS === false) {
+            return false;
         }
+        if (user && user.rolesOrPermissions && user.rolesOrPermissions.some(r => r === "admin")) {
+            // todo@alex add terms check for admin users
+        } 
+        const userCount = await this.userDb.getUserCount();
+        if (userCount === 0) {
+            return true;
+        }
+        return false;
+    }
+
+    async checkIsBlocked(params: CheckIsBlockedParams): Promise<boolean> {
+        if (params.user && params.user.blocked) {
+            return true;
+        }
+        if (params.primaryEmail) {
+            return this.blockedUserFilter.isBlocked(params.primaryEmail);
+        }
+        return false;
     }
 }

@@ -18,13 +18,12 @@ import * as uuidv4 from 'uuid/v4';
 import { runInNewContext } from "vm";
 import { AuthBag, AuthProvider } from "../auth/auth-provider";
 import { AuthProviderParams, AuthUserSetup } from "../auth/auth-provider";
-import { AuthException, EMailDomainFilterException } from "../auth/errors";
+import { AuthException } from "../auth/errors";
 import { GitpodCookie } from "../auth/gitpod-cookie";
 import { Env } from "../env";
 import { getRequestingClientInfo } from "../express-util";
 import { TokenProvider } from '../user/token-provider';
 import { UserService } from "../user/user-service";
-import { BlockedUserFilter } from "./blocked-user-filter";
 import { AuthProviderService } from './auth-provider-service';
 import { AuthErrorHandler } from './auth-error-handler';
 
@@ -63,7 +62,6 @@ export class GenericAuthProvider implements AuthProvider {
     @inject(UserDB) protected userDb: UserDB;
     @inject(Env) protected env: Env;
     @inject(GitpodCookie) protected gitpodCookie: GitpodCookie;
-    @inject(BlockedUserFilter) protected readonly blockedUserFilter: BlockedUserFilter;
     @inject(UserService) protected readonly userService: UserService;
     @inject(AuthProviderService) protected readonly authProviderService: AuthProviderService;
     @inject(AuthErrorHandler) protected readonly authErrorHandler: AuthErrorHandler;
@@ -422,85 +420,82 @@ export class GenericAuthProvider implements AuthProvider {
      * - finally, it's expected to call `done` and provide the computed result in order to finalize the auth process
      */
     protected async verify(req: express.Request, accessToken: string, refreshToken: string | undefined, tokenResponse: any, _profile: undefined, done: OAuth2Strategy.VerifyCallback) {
-        const { strategyName } = this;
+        interface AdditionalVerifyResult {
+            termsAcceptanceRequired?: boolean;
+            elevateScopes?: string[];
+            isBlocked?: boolean;
+        }
+        const hints: AdditionalVerifyResult = {};
+        const { strategyName, config } = this;
         const clientInfo = getRequestingClientInfo(req);
         const authProviderId = this.authProviderId;
-        const authBag = AuthBag.get(req.session);
-        if (!authBag) {
-            log.info(`(${strategyName}) Invalid Auth Session. No Auth Bag attached.`, { req, clientInfo, tokenResponse });
-            done(new Error("Invalid Auth Session!"));
-            return;
-        }
+        const authBag = AuthBag.get(req.session)!; // asserted in `callback`
         const defaultLogPayload = { authBag, clientInfo, authProviderId };
+        let currentGitpodUser: User | undefined = User.is(req.user) ? req.user : undefined;
+        let candidate: Identity;
+
+        const fail = (err: any) => done(err, currentGitpodUser || candidate, hints);
+        const complete = () => done(undefined, currentGitpodUser || candidate, hints);
+
         try {
             const tokenResponseObject = this.ensureIsObject(tokenResponse);
             const { authUser, blockUser, currentScopes, envVars } = await this.fetchAuthUserSetup(accessToken, tokenResponseObject);
             const { authId, authName, primaryEmail } = authUser;
-            let identity: Identity = { authProviderId, authId, authName, primaryEmail };
+            candidate = { authProviderId, ...authUser };
 
-            log.info(`(${strategyName}) Verify for authName: ${authName}`, { ...defaultLogPayload, authUser });
+            log.info(`(${strategyName}) Verify function called. for authName: ${authName}`, { ...defaultLogPayload, authUser });
 
-            let currentGitpodUser = req.user as User | undefined;
+            if (!currentGitpodUser) { // i.e. no user session available
 
-            if (!User.is(currentGitpodUser)) { // no user in sessino, thus login-flow
-
-                // handle blacklisted users
-                if (await this.blockedUserFilter.isBlocked(primaryEmail)) {
-                    done(EMailDomainFilterException.create(primaryEmail));
-                    return;
-                }
-
-                // first try to find a user by identity/email.
-                currentGitpodUser = await this.userDb.findUserByIdentity(identity);
+                // try to find our Gitpod user 
+                // 1) by identity
+                // 2) by email.
+                currentGitpodUser = await this.userDb.findUserByIdentity(candidate);
                 if (!currentGitpodUser) {
-                    // 1) findUsersByEmail is supposed to return users ordered descending by last login time
-                    // 2) we pick the most recently used one and let the old onces "dry out"
+                    // - findUsersByEmail is supposed to return users ordered descending by last login time
+                    // - we pick the most recently used one and let the old onces "dry out"
                     const usersWithSamePrimaryEmail = await this.userDb.findUsersByEmail(primaryEmail);
                     if (usersWithSamePrimaryEmail.length > 0) {
                         currentGitpodUser = usersWithSamePrimaryEmail[0];
-                        log.info(`(${strategyName}) Found user by email address. Log in...`, { ...defaultLogPayload, identity, usersWithSamePrimaryEmail, authUser });
                     }
                 }
 
-                if (!currentGitpodUser) {
-                    // handle additional requirements
-                    await this.userService.checkSignUp({ config: this.config, identity });
-
-                    // We have never seen this user before, create new user and continue.
-                    currentGitpodUser = await this.userService.createUserForIdentity(identity);
-                }
-
-                // block new users per request
-                if (blockUser) {
-                    currentGitpodUser.blocked = true;
-                }
             } else { // current Gitpod user known from session
-                let identity = currentGitpodUser.identities.find(i => i.authId === authId);
 
-                if (!identity) {
+                if (!currentGitpodUser.identities.some(i => i.authId === authId)) { // current Gitpod user has no such identity. 
 
-                    // 1) there might be another Gitpod user linked with this identity, let's associate with current user
+                    // there might be another Gitpod user linked with this identity.
+                    // on completion this identity will be associated with current user, thus log this change.
                     const userWithSameIdentity = await this.userDb.findUserByIdentity({ authProviderId, authId });
                     if (userWithSameIdentity) {
-                        identity = userWithSameIdentity.identities.find(identity => Identity.equals(identity, { authId, authProviderId }));
-                        log.info(`(${strategyName}) Moving identity to most recently used user.`, { ...defaultLogPayload, authUser, currentGitpodUser, userWithSameIdentity, identity, clientInfo });
+                        log.info(`(${strategyName}) Moving identity to the current Gitpod user.`, { ...defaultLogPayload, authUser, candidate, currentGitpodUser, userWithSameIdentity, clientInfo });
                     }
-
-                    // 2) this identity is linked for the first time
-                    if (!identity) {
-                        identity = { authProviderId, authId, authName, primaryEmail };
-                    }
-
                 }
             }
 
+            hints.termsAcceptanceRequired = await this.userService.checkTermsAcceptanceRequired({ config, identity: candidate, user: currentGitpodUser });
+
+            if (!currentGitpodUser && !hints.termsAcceptanceRequired) {
+                // in a special case we may create new users without terms flow
+
+                currentGitpodUser = await this.userService.createUserForIdentity(candidate, blockUser);
+            }
+
+            hints.isBlocked = await this.userService.checkIsBlocked({ primaryEmail, user: currentGitpodUser });
+
+            if (!currentGitpodUser) {
+                
+                complete();
+                return;
+            }
 
             /*
              * At this point we have found/created a Gitpod user and the user profile/setup is fetched, let's update the link!
              */
 
-            const existingIdentity = currentGitpodUser.identities.find(i => Identity.equals(i, identity));
+            const existingIdentity = currentGitpodUser.identities.find(i => Identity.equals(i, candidate));
             if (existingIdentity) {
+                candidate = existingIdentity;
                 let shouldElevate = false;
                 let prevScopes: string[] = [];
                 try {
@@ -511,18 +506,14 @@ export class GenericAuthProvider implements AuthProvider {
                     // no token
                 }
                 if (shouldElevate) {
-                    log.info(`(${strategyName}) Existing user needs to elevate scopes.`, { ...defaultLogPayload, identity });
-                    const authBag = AuthBag.get(req.session);
-                    if (req.session && authBag && authBag.requestType === "authenticate") {
-                        await AuthBag.attach(req.session, { ...authBag, elevateScopes: prevScopes });
-                    }
+                    log.info(`(${strategyName}) Existing user needs to elevate scopes.`, { ...defaultLogPayload, identity: candidate });
+                    hints.elevateScopes = prevScopes;
                 }
-                identity = existingIdentity;
             }
 
             // ensure single identity per auth provider instance
             currentGitpodUser.identities = currentGitpodUser.identities.filter(i => i.authProviderId !== authProviderId);
-            currentGitpodUser.identities.push(identity);
+            currentGitpodUser.identities.push(candidate);
 
             // update user
             currentGitpodUser.name = authUser.authName || currentGitpodUser.name;
@@ -541,18 +532,18 @@ export class GenericAuthProvider implements AuthProvider {
                 expiryDate,
                 refreshToken
             };
-            identity.primaryEmail = authUser.primaryEmail; // case: changed email
-            identity.authName = authUser.authName; // case: renamed account
+            candidate.primaryEmail = authUser.primaryEmail; // case: changed email
+            candidate.authName = authUser.authName; // case: renamed account
 
-            await this.userDb.storeUser(currentGitpodUser),
-                await this.userDb.storeSingleToken(identity, token),
-                await this.updateEnvVars(currentGitpodUser, envVars),
-                await this.createGhProxyIdentityOnDemand(currentGitpodUser, identity)
+            await this.userDb.storeUser(currentGitpodUser);
+            await this.userDb.storeSingleToken(candidate, token);
+            await this.updateEnvVars(currentGitpodUser, envVars);
+            await this.createGhProxyIdentityOnDemand(currentGitpodUser, candidate);
 
-            done(null, currentGitpodUser);
+            complete()
         } catch (err) {
-            log.error(`(${strategyName}) Exception in verify function`, err, { ...defaultLogPayload, err });
-            done(err);
+            log.error(`(${strategyName}) Exception in verify function`, err, { ...defaultLogPayload, err, authBag });
+            fail(err);
         }
     }
 
