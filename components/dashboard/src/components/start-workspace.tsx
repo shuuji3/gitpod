@@ -23,6 +23,7 @@ import { WithBranding } from './with-branding';
 import { Context } from '../context';
 
 interface StartWorkspaceState {
+    workspace?: Workspace;
     workspaceInstance?: WorkspaceInstance;
     errorMessage?: string;
     errorCode?: number;
@@ -135,6 +136,9 @@ export class StartWorkspace extends React.Component<StartWorkspaceProps, StartWo
                     // (needed for already started workspaces, and not hanging in 'Starting ...' for too long)
                     this.props.service.server.getWorkspace(workspaceId).then(ws => {
                         if (ws.latestInstance) {
+                            this.setState({
+                                workspace: ws.workspace
+                            });
                             this.onInstanceUpdate(ws.latestInstance);
                         }
                     });
@@ -358,12 +362,28 @@ export class StartWorkspace extends React.Component<StartWorkspaceProps, StartWo
                         <div className='message stopped-reason'>{stoppedReason}</div>
                     </React.Fragment>;
                 }
-            }
-            if (this.state.workspaceInstance.status.phase === 'stopped' && this.props.workspaceId) {
-                const startUrl = new GitpodHostUrl(window.location.toString()).asStart(this.props.workspaceId).toString();
+                const repo = this.state.workspaceInstance && this.state.workspaceInstance.status && this.state.workspaceInstance.status.repo;
+                if (repo && (repo?.totalUncommitedFiles !== 0 || repo?.totalUnpushedCommits !== 0 || repo?.totalUntrackedFiles !== 0)) {
+                    
+                }
+        
+                const urls = new GitpodHostUrl(window.location.toString());
+                const startUrl = urls.asStart(this.props.workspaceId).toString();
+                const workspaceHistory = urls.asDashboard().toString();
+                const ctxURL = new URL(this.state.workspace!.contextURL)
+                const host = "Back to " + ctxURL.host;
                 message = <React.Fragment>
                     {message}
-                    <div className='message start-action'><Button className='button' variant='outlined' color='secondary' onClick={() => {
+                    <div className='message start-action'>
+                        <Button className='button' variant='outlined' color='primary' onClick={() => {
+                        this.redirectTo(workspaceHistory)
+                    }}>Workspace History</Button>
+                    <Button className='button' variant='outlined' color='primary' onClick={() => {
+                        this.redirectTo(this.state.workspace!.contextURL)
+                    }}>{host}</Button>
+                        <Button className='button' variant='outlined' color='secondary' 
+                            disabled={this.state.workspaceInstance.status.phase !== 'stopped'}
+                            onClick={() => {
                         this.redirectTo(startUrl)
                     }}>Start Workspace</Button></div>
                 </React.Fragment>;

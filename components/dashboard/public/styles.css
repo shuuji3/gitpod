@@ -490,6 +490,10 @@ footer .logo-icon {
     z-index: 1001;
 }
 
+.start .message.start-action .button {
+    margin: 0 20px;
+}
+
 .start .error.message {
     top: 43vh;
     width: 90vw;
