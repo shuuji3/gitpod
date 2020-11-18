@@ -78,6 +78,7 @@ type GitpodInstallation struct {
 	Scheme              string `json:"scheme"`
 	HostName            string `json:"hostName"`
 	WorkspaceHostSuffix string `json:"workspaceHostSuffix"`
+	DashboardBaseURL    string `json:"dashboardBaseURL"`
 }
 
 // Validate validates the configuration to catch issues during startup and not at runtime

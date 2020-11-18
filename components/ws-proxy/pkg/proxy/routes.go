@@ -261,17 +261,27 @@ func installWorkspacePortRoutes(r *mux.Router, config *RouteHandlerConfig) {
 	// filter all session cookies
 	r.Use(sensitiveCookieHandler(config.Config.GitpodInstallation.HostName))
 
-	// forward request to workspace port
+	// forward request to workspace port - or to the dashboard if the port isn't available
+	// TODO(cw): rather than have the connection attempt time out, use the port status to determine
+	//           if the port is exposed.
 	r.NewRoute().HandlerFunc(
 		proxyPass(
 			config,
 			workspacePodPortResolver,
 			withErrorHandler(func(w http.ResponseWriter, req *http.Request, e error) {
-				w.WriteHeader(http.StatusInternalServerError)
-				fmt.Fprintf(w, e.Error())
+				proxyPass(config, portNotFoundResolver, nil)
 			}),
 		),
 	)
+}
+
+func portNotFoundResolver(config *Config, req *http.Request) (url *url.URL, err error) {
+	baseURL, err := url.Parse(config.GitpodInstallation.DashboardBaseURL)
+	if err != nil {
+		return nil, err
+	}
+	baseURL.Path = "/port-not-found"
+	return baseURL, nil
 }
 
 // workspacePodResolver resolves to the workspace pod's url from the given request
